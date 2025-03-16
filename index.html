@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>PDF Viewer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #f0f0f0;
+      overflow: hidden;
+    }
+    #pdf-container {
+      width: 100vw;
+      height: 100vh;
+      overflow-x: auto; /* Enables horizontal panning when zoomed */
+      overflow-y: auto; /* Enables vertical scrolling */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-bottom: 20px;
+      -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS & WeChat */
+    }
+    canvas {
+      display: block;
+      margin: 10px auto;
+      max-width: 100%;
+    }
+    .link-overlay {
+      position: absolute;
+      background-color: transparent;
+      cursor: pointer;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="pdf-container"></div>
+  <div id="link-container" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 10;"></div>
+  
+  <script>
+    // Load PDF.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    
+    // Function to determine which PDF to use based on screen width
+    function getPdfUrl() {
+      // Set breakpoint for mobile vs desktop (768px is a common breakpoint)
+      const mobileBreakpoint = 768;
+      
+      if (window.innerWidth < mobileBreakpoint) {
+        return 'DING.pdf'; // Mobile version
+      } else {
+        return 'DING_FullWidth.pdf'; // Desktop version
+      }
+    }
+    
+    let pdfDoc = null;
+    const pdfContainer = document.getElementById('pdf-container');
+    const linkContainer = document.getElementById('link-container');
+    let pagePositions = []; // To track the position of each page for link placement
+    let currentPdfUrl = ''; // Track which PDF is currently loaded
+    
+    async function renderPage(num) {
+      const page = await pdfDoc.getPage(num);
+      // Use the device pixel ratio to render at high resolution.
+      const outputScale = window.devicePixelRatio || 1;
+      const baseScale = 1.0; // Render at native scale
+      const baseViewport = page.getViewport({ scale: baseScale });
+      
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      
+      // Set the canvas internal dimensions to a high resolution
+      canvas.width = Math.floor(baseViewport.width * outputScale);
+      canvas.height = Math.floor(baseViewport.height * outputScale);
+      
+      // Then set the displayed size to the original dimensions
+      canvas.style.width = `${Math.floor(baseViewport.width)}px`;
+      canvas.style.height = `${Math.floor(baseViewport.height)}px`;
+      
+      // Disable image smoothing to maintain sharpness
+      context.imageSmoothingEnabled = false;
+      
+      pdfContainer.appendChild(canvas);
+      
+      // Store this page's position for link placement
+      // We need to wait for the canvas to be in the DOM
+      setTimeout(() => {
+        const rect = canvas.getBoundingClientRect();
+        pagePositions[num] = {
+          top: rect.top + window.scrollY,
+          left: rect.left + window.scrollX,
+          width: rect.width,
+          height: rect.height,
+          scale: rect.width / baseViewport.width
+        };
+        
+        // Now we can add links for this page
+        addLinksForPage(num, page, baseViewport);
+      }, 0);
+      
+      // Create a high-res viewport for rendering
+      const highResViewport = page.getViewport({ scale: baseScale * outputScale });
+      const renderContext = {
+        canvasContext: context,
+        viewport: highResViewport
+      };
+      
+      // Render the page
+      await page.render(renderContext).promise;
+    }
+    
+    async function addLinksForPage(pageNum, page, viewport) {
+      // Only proceed if we have the page position
+      if (!pagePositions[pageNum]) return;
+      
+      const annotations = await page.getAnnotations();
+      const pagePos = pagePositions[pageNum];
+      
+      // Process link annotations
+      annotations.forEach(annotation => {
+        if (annotation.subtype === 'Link' && annotation.url) {
+          const [x1, y1, x2, y2] = annotation.rect;
+          
+          // Convert PDF coordinates to viewport coordinates
+          const [vx1, vy1, vx2, vy2] = viewport.convertToViewportRectangle([x1, y1, x2, y2]);
+          
+          // Create a clickable div for the link
+          const linkDiv = document.createElement('div');
+          linkDiv.className = 'link-overlay';
+          
+          // Scale and position the link based on the actual rendered canvas size
+          linkDiv.style.left = `${pagePos.left + Math.min(vx1, vx2) * pagePos.scale}px`;
+          linkDiv.style.top = `${pagePos.top + Math.min(vy1, vy2) * pagePos.scale}px`;
+          linkDiv.style.width = `${Math.abs(vx2 - vx1) * pagePos.scale}px`;
+          linkDiv.style.height = `${Math.abs(vy2 - vy1) * pagePos.scale}px`;
+          linkDiv.style.pointerEvents = 'auto'; // Make only the links clickable
+          
+          // Add click event to open link in new tab
+          linkDiv.onclick = function() {
+            window.open(annotation.url, '_blank');
+          };
+          
+          linkContainer.appendChild(linkDiv);
+        }
+      });
+    }
+    
+    async function loadPDF() {
+      try {
+        // Determine which PDF to load
+        const url = getPdfUrl();
+        
+        // Only reload if the PDF has changed
+        if (url !== currentPdfUrl) {
+          currentPdfUrl = url;
+          
+          // Clear existing content
+          pdfContainer.innerHTML = "";
+          linkContainer.innerHTML = "";
+          pagePositions = [];
+          
+          // Load and render the appropriate PDF
+          pdfDoc = await pdfjsLib.getDocument(url).promise;
+          for (let i = 1; i <= pdfDoc.numPages; i++) {
+            await renderPage(i);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading PDF:', error);
+      }
+    }
+    
+    // On resize, check if we need to switch PDFs
+    window.addEventListener("resize", () => {
+      loadPDF();
+    });
+    
+    // Add listener for scroll events to update link positions
+    pdfContainer.addEventListener('scroll', () => {
+      // Update link container position to match scroll
+      linkContainer.style.top = `${-pdfContainer.scrollTop}px`;
+      linkContainer.style.left = `${-pdfContainer.scrollLeft}px`;
+    });
+    
+    // Initial load
+    loadPDF();
+  </script>
+</body>
+</html>
